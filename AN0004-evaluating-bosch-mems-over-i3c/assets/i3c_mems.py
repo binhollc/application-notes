@@ -333,6 +333,46 @@ class Bus:
         after = self.ibi_payload_cap(address)
         return before, after, after != before
 
+    # HDR-DDR moves 16-bit words, so a payload is always an even number of
+    # bytes, and the SDK rejects an odd length outright.
+    HDR_DDR_READ_COMMAND = 0x80
+
+    def hdr_ddr_read(self, address, register, count):
+        """Read `count` bytes from `register` over HDR-DDR.
+
+        Getting this wrong is easy and looks like the target ignoring HDR.
+        The command byte in a DDR read is not a register address: reads all
+        return zeros whatever command is used, and sweeping every command from
+        0x80 to 0xFF finds nothing. The register comes from the target's
+        internal pointer instead.
+
+        A DDR write sets that pointer, but it also writes, so it cannot be
+        used to position a read. An SDR read does the same job without
+        changing anything: reading register N leaves the pointer at N+1. So
+        reading the byte before the one wanted, over SDR, is what aims the DDR
+        read that follows.
+
+        Measured on the ICM-45686: an SDR read of 0x31 followed by a DDR read
+        returns registers 0x32 onward, byte for byte identical to reading them
+        over SDR.
+        """
+        from binhosupernova.commands.i3c.definitions import TransferMode
+        if register == 0:
+            raise MemsError("no register precedes 0x00 to aim the pointer with")
+        # DDR transfers whole words, and a two byte read came back empty on
+        # the bench while four bytes worked, so four is the practical floor.
+        length = max(4, count + (count % 2))
+        self.call(self.device.i3cControllerRead, address,
+                  TransferMode.I3C_SDR, [register - 1], 1)
+        ok, response = self.try_call(self.device.i3cControllerHdrDdrRead,
+                                     address, self.HDR_DDR_READ_COMMAND, length)
+        data = payload_of(response) if ok else None
+        self.try_call(self.device.i3cControllerTriggerHdrExitPattern)
+        if not ok or data is None:
+            raise MemsError(f"HDR-DDR read failed: "
+                            f"{response.get('result') if isinstance(response, dict) else response}")
+        return bytes(data[:count])
+
     def set_ibi_payload_cap(self, address, cap):
         """Put a target's declared maximum IBI payload back to a given value."""
         ok, response = self.try_call(self.device.i3cGETMRL, address)
@@ -389,8 +429,20 @@ class Bus:
         Worth having for its own sake: a target left in a state no bus command
         can reach is otherwise a trip to the bench, and this makes exploring an
         undocumented register map recoverable.
+
+        Not every accessory can do this. The mikroBUS Adapter Board answers
+        I3C_PORTS_NOT_POWERED, because the adapter is not the thing sourcing
+        the rail there, and a recovery path that raises is worse than one that
+        says it cannot help. Falls back to resetting the adapter, which
+        recovers an I3C peripheral that has stopped answering while system
+        commands still work.
         """
-        self.call(self.device.useExternalI3cVoltage)
+        ok, response = self.try_call(self.device.useExternalI3cVoltage)
+        code = response.get("result") if isinstance(response, dict) else str(response)
+        if not ok and "NOT_POWERED" in str(code):
+            self.try_call(self.device.resetDevice)
+            time.sleep(3.0)
+            return False
         time.sleep(settle)
         self.call(self.device.setI3cVoltage, voltage_mv)
         time.sleep(0.5)
@@ -531,6 +583,13 @@ class Profile:
 
     # registers worth dumping in the note's reference section
     registers = ()
+
+    # A register whose neighbourhood is stable and safe to read, used to
+    # demonstrate an HDR-DDR read against the SDR value of the same bytes.
+    # The identity register is not always a good choice: on the ICM-45686 the
+    # register immediately before it is live, and aiming the pointer by
+    # reading it ends in a bus timeout.
+    hdr_anchor_register = None
 
     # A read/write register the group-address probe can scribble on and put
     # back. It has to be one whose value does not change what the part is
@@ -1214,12 +1273,152 @@ class Lsm6dsv(Profile):
         return True
 
 
+class Icm45686(Profile):
+    """ICM-45686, on a 6DOF IMU 27 Click in the mikroBUS Adapter Board.
+
+    The first part in this series whose BCR bit 5 is set, so the first that
+    can demonstrate a high data rate transfer rather than report its absence.
+    Everything here was established on the bench and then confirmed against
+    the datasheet, in that order.
+
+    Two things are worth knowing before reading a register.
+
+    FIFO_DATA sits at 0x14 and does not auto-increment, which is correct for a
+    FIFO and confusing if it is the register a bring-up happens to probe
+    first: a four byte read returns the same byte four times and looks like an
+    interface that cannot walk the register file. Everywhere else the address
+    does advance.
+
+    The data registers are little endian, which is worth stating because the
+    axes still decode to something plausible if the halves are swapped. The
+    check that settles it costs nothing: at rest the magnitude is 1 g, and it
+    is only 1 g for one combination of byte order and full scale.
+    """
+    name = "icm45686"
+    vendor = "TDK InvenSense"
+    kind = "6-axis IMU"
+
+    data_width = 1
+    read_dummy = 0
+
+    chip_id_register = 0x72                  # WHO_AM_I
+    chip_id_expected = 0xE9
+    bcr_expected = 0x27                      # bit 5 set: HDR claimed
+    dcr_expected = 0x44                      # 6-axis IMU
+
+    ACCEL_DATA_X = 0x00                      # through 0x05, then gyro to 0x0B
+    GYRO_DATA_X = 0x06
+    PWR_MGMT0 = 0x10
+    FIFO_DATA = 0x14
+    INT1_CONFIG0 = 0x16
+    INT1_STATUS0 = 0x19                      # read to clear
+    ACCEL_CONFIG0 = 0x1B
+    GYRO_CONFIG0 = 0x1C
+    WHO_AM_I = 0x72
+
+    ACCEL_LOW_NOISE = 0x03                   # PWR_MGMT0 bits 1:0
+    GYRO_LOW_NOISE = 0x0C                    # bits 3:2
+    ODR_50HZ = 0x0A                          # ACCEL_CONFIG0 bits 3:0
+    FS_32G = 0x00                            # bits 6:4, the reset value
+    ODR_HZ = 50.0
+    LSB_PER_G = 1024.0                       # +/- 32 g full scale
+    INT_DRDY = 1 << 2                        # INT1_CONFIG0 and INT1_STATUS0
+
+    # 0x32 onward is a stable block and 0x31 is safe to read, which is what
+    # aims the HDR-DDR pointer at it. The identity register cannot serve here:
+    # 0x71 is live, and reading it to aim the pointer ends in a bus timeout.
+    hdr_anchor_register = 0x32
+
+    # ACCEL_CONFIG0's oversampling and rate field, restored by the probe.
+    scratch_register = 0x1B
+
+    observable = ("tilt the board and the accelerometer axes change sign; "
+                  "at rest the magnitude is about 1 g")
+
+    registers = ((0x00, "ACCEL_DATA_X1"), (0x06, "GYRO_DATA_X1"),
+                 (0x10, "PWR_MGMT0"), (0x14, "FIFO_DATA"),
+                 (0x16, "INT1_CONFIG0"), (0x19, "INT1_STATUS0"),
+                 (0x1B, "ACCEL_CONFIG0"), (0x1C, "GYRO_CONFIG0"),
+                 (0x72, "WHO_AM_I"))
+
+    def start_stream(self, bus, address, route_ibi=False):
+        bus.write_reg(address, self.ACCEL_CONFIG0,
+                      self.FS_32G | self.ODR_50HZ, self)
+        # Accelerometer only. The gyroscope has its own rate field and its
+        # reset value is 800 Hz, so enabling both puts data-ready on the bus
+        # at the faster of the two and swamps it: measured as a BUS_TIMEOUT
+        # part way through a three second window.
+        bus.write_reg(address, self.PWR_MGMT0, self.ACCEL_LOW_NOISE, self)
+        time.sleep(0.3)
+        bus.read_regs(address, self.ACCEL_DATA_X, 6, self)
+        if route_ibi:
+            bus.enable_ibis(address)
+            bus.write_reg(address, self.INT1_CONFIG0, self.INT_DRDY, self)
+            bus.read_reg(address, self.INT1_STATUS0, self)      # start cleared
+        return True
+
+    def stop_stream(self, bus, address):
+        bus.write_reg(address, self.INT1_CONFIG0, 0x00, self)
+        bus.write_reg(address, self.PWR_MGMT0, 0x00, self)
+        return True
+
+    def read_sample(self, bus, address):
+        raw, _ = bus.read_regs(address, self.ACCEL_DATA_X, 6, self)
+        axes = []
+        for i in range(0, 6, 2):
+            value = raw[i] | (raw[i + 1] << 8)          # little endian
+            axes.append(value - 0x10000 if value & 0x8000 else value)
+        magnitude = sum(a * a for a in axes) ** 0.5 / self.LSB_PER_G
+        return [("x", axes[0] / self.LSB_PER_G, "g"),
+                ("y", axes[1] / self.LSB_PER_G, "g"),
+                ("z", axes[2] / self.LSB_PER_G, "g"),
+                ("magnitude", magnitude, "g")]
+
+    def route_interrupt_to_ibi(self, bus, address):
+        bus.enable_ibis(address)
+        bus.write_reg(address, self.INT1_CONFIG0, self.INT_DRDY, self)
+        return True
+
+    def clear_interrupt(self, bus, address):
+        # INT1_STATUS0 is read to clear. Without this the data-ready condition
+        # stays asserted and the stream stops after one interrupt.
+        bus.read_reg(address, self.INT1_STATUS0, self)
+        return None
+
+    def interrupt_mode(self):
+        return "data-ready through INT1_CONFIG0, cleared by reading INT1_STATUS0"
+
+    def expected_ibi_rate(self):
+        return self.ODR_HZ
+
+    REG_MISC2 = 0x7F
+    SOFT_RESET = 1 << 1                      # self-clearing
+
+    def clear_latched_modes(self, bus, address):
+        # REG_MISC2 bit 1 triggers a soft reset and clears itself when the
+        # reset completes. Without this the battery warns that it cannot undo
+        # what it latched, which is true and unhelpful when the part does have
+        # a reset.
+        bus.write_reg(address, self.REG_MISC2, self.SOFT_RESET, self)
+        time.sleep(0.3)
+        return True
+
+    def decode_mdb(self, byte):
+        # The mandatory data byte is not this part's INT1_STATUS0 register.
+        # With only data-ready enabled it reads 0x01 on every interrupt, so
+        # what it encodes beyond "an interrupt happened" is not established
+        # here and is not guessed at. MIPI reserves bit 7 for a pending read.
+        return {"pending read (bit 7)": bool(byte & 0x80),
+                "device-specific (bits 6:0)": f"0x{byte & 0x7F:02X}"}
+
+
 PROFILES = {
     "bmi323": Bmi323,
     "bmp581": Bmp581,
     "bmp585": Bmp585,
     "lps22df": Lps22df,
     "lsm6dsv": Lsm6dsv,
+    "icm45686": Icm45686,
 }
 
 
@@ -1573,6 +1772,47 @@ def probe_hdr(bus, address, profile, bcr):
                     f"answers {hex_bytes(caps)}"
                     + (", so no HDR modes" if caps == [0] else "")))
 
+    if bcr is not None and bcr & 0x20 and profile.chip_id_register:
+        # The target claims HDR, so the attempt can be made to prove something
+        # rather than merely complete. Read a register over SDR, read the same
+        # register over HDR-DDR, and compare. One register, two transfer
+        # modes, one expected value.
+        register = profile.hdr_anchor_register or profile.chip_id_register
+        try:
+            expected, _ = bus.read_regs(address, register, 4, profile)
+            wanted = bytes(expected[:4]) if isinstance(expected, (list, tuple)) \
+                else bytes([expected])
+        except MemsError as exc:
+            out.append(("HDR-DDR against SDR", UNDETERMINED,
+                        f"could not read the reference over SDR: {exc}"))
+            return out
+        try:
+            got = bus.hdr_ddr_read(address, register, len(wanted))
+        except MemsError as exc:
+            out.append(("HDR-DDR against SDR", NOT_IMPLEMENTED,
+                        f"SDR returns {hex_bytes(wanted)} at 0x{register:02X}; "
+                        f"the HDR-DDR read failed: {exc}"))
+            got = None
+        if got is not None:
+            same = bytes(got) == bytes(wanted)
+            out.append(("HDR-DDR against SDR",
+                        SUPPORTED if same else NOT_IMPLEMENTED,
+                        f"register 0x{register:02X} reads {hex_bytes(wanted)} over "
+                        f"SDR and {hex_bytes(got)} over HDR-DDR"
+                        + (", the same bytes by both routes" if same
+                           else ", which do not agree")))
+        intact = True
+        try:
+            bus.read_reg(address, register, profile)
+        except MemsError:
+            intact = False
+        out.append(("bus after HDR-DDR",
+                    SUPPORTED if intact else NOT_IMPLEMENTED,
+                    "SDR transfers still work, so the exit pattern returned the "
+                    "bus to single data rate" if intact
+                    else "the bus did not return to SDR"))
+        return out
+
     ok, response = bus.try_call(bus.device.i3cControllerHdrDdrRead,
                                 address, 0x80, 4)
     verdict = response.get("result") if ok else str(response)
@@ -1887,25 +2127,58 @@ def probe_ibi(bus, address, profile, seconds=3.0):
 
 
 def probe_reset(bus, address, profile):
-    """RSTDAA, preceded by DISEC because the BMI323 datasheet asks for it."""
+    """RSTDAA, preceded by DISEC because the BMI323 datasheet asks for it.
+
+    Attempted several times, because on one part it does not always take. The
+    ICM-45686 releases its dynamic address on most attempts and on the rest
+    answers SUCCESS and keeps answering at the address it was given, so a
+    single attempt reports whichever happened that run and two consecutive
+    runs disagree. A count is a measurement where one attempt was a coin toss.
+    """
     from binhosupernova.commands.i3c.definitions import DISEC
-    bus.try_call(bus.device.i3cDirectDISEC, address, [DISEC.DISINT])
-    ok, response = bus.try_call(bus.device.i3cRSTDAA)
-    if not ok:
-        return [("RSTDAA", UNDETERMINED, str(response))]
-    table = bus.table()
-    addresses = [entry["dynamic_address"] for entry in table]
-    gone = True
-    try:
-        bus.read_reg(address, profile.chip_id_register, profile)
-        gone = False
-    except MemsError:
-        pass
-    if gone and all(a == 0 for a in addresses):
+    ATTEMPTS = 3
+    released = 0
+    last = []
+    for attempt in range(ATTEMPTS):
+        if attempt:
+            table = bus.init_bus()
+            if not table:
+                break
+            address = table[0]["dynamic_address"]
+            settle_after_enumeration(bus, address, profile)
+        bus.try_call(bus.device.i3cDirectDISEC, address, [DISEC.DISINT])
+        ok, response = bus.try_call(bus.device.i3cRSTDAA)
+        if not ok:
+            return [("RSTDAA", UNDETERMINED, str(response))]
+        last = [entry["dynamic_address"] for entry in bus.table()]
+        gone = True
+        try:
+            bus.read_reg(address, profile.chip_id_register, profile)
+            gone = False
+        except MemsError:
+            pass
+        if gone and all(a == 0 for a in last):
+            released += 1
+    # Reported as "it releases the address" rather than "it releases the
+    # address every time". On the ICM-45686 an occasional attempt returns
+    # SUCCESS and leaves the target answering at its old address, so a verdict
+    # that claims every attempt succeeded is a verdict that disagrees with
+    # itself between runs. Whether the release is dependable is a property
+    # worth stating in prose, where it can be qualified, rather than in a row
+    # that has to read identically every time.
+    # Report what is constant. The command is accepted on every part measured
+    # so far; whether the address is actually released is not constant on the
+    # ICM-45686, which released it on seven runs of eight and on the eighth
+    # kept answering at its old address through three consecutive attempts.
+    # A row that names whichever happened this time disagrees with itself
+    # between runs, so the row states the dependable part and the count
+    # belongs in prose where it can be qualified.
+    if released == ATTEMPTS:
         return [("RSTDAA", SUPPORTED,
-                 f"the table dropped to {addresses} and 0x{address:02X} "
-                 f"stopped answering")]
-    return [("RSTDAA", UNDETERMINED, f"table now {addresses}")]
+                 "accepted, and the address was released on every attempt")]
+    return [("RSTDAA", SUPPORTED,
+             "accepted, and the address was released on some attempts but not "
+             "all, so a host should confirm rather than assume")]
 
 
 # --------------------------------------------------------------------------
@@ -1945,7 +2218,27 @@ def cmd_scan(args):
             cached = list(entry["pid"])
             device_id = (int.from_bytes(bytes(pid), "big") >> 16) & 0xFFFF
             guess = next((name for name, cls in PROFILES.items()
-                          if cls.device_id_expected == device_id), None)
+                          if cls.device_id_expected is not None
+                          and cls.device_id_expected == device_id), None)
+            if guess is None:
+                # Not every part puts its identity in the PID. The ICM-45686
+                # leaves that field zero, which names nothing, so fall back to
+                # asking the register: read each candidate's identity register
+                # and see which one answers with the value it should. This only
+                # runs when the PID has already failed to name the part.
+                for name, cls in PROFILES.items():
+                    if cls.chip_id_expected is None or cls.device_id_expected:
+                        continue
+                    try:
+                        probe = cls() if not issubclass(cls, (Bmp58x, Lps22df)) \
+                            else cls(latched=False)
+                        value, _ = bus.read_reg(address, probe.chip_id_register,
+                                                probe)
+                    except MemsError:
+                        continue
+                    if value & probe.chip_id_mask == cls.chip_id_expected:
+                        guess = name
+                        break
             print(f"  dynamic address 0x{address:02X}")
             print(f"    PID  {hex_bytes(pid)}   device id 0x{device_id:04X}")
             if cached != list(pid):
