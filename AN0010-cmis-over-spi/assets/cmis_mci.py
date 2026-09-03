@@ -36,7 +36,7 @@ import struct
 import sys
 import time
 
-TOOL_VERSION = "1.0"
+TOOL_VERSION = "1.1"
 
 CMIS_ADDRESS = 0x50
 
@@ -86,6 +86,8 @@ LIMITS_MS = {
 # Block LPL (0103h) spends 4 on the block offset. The Extended Payload is pages
 # A0h to AFh, 16 pages of 128 bytes, written by Write Firmware Block EPL (0104h).
 CDB_PAGE, LPL_BLOCK, EPL_BLOCK, EPL_ACCESS = 0x9F, 116, 16 * 128, 128
+# Appendix B.3.7.1: one SPIMCI transaction carries up to 2048 bytes.
+SPI_MAX_TRANSFER = 2048
 
 
 def split_access(byte_addr, length, nmax):
@@ -834,9 +836,20 @@ def wire_ms(n_data, frequency_hz):
     return (4 + n_data) * 9 / frequency_hz * 1000
 
 
-def _budget(image_bytes, block, access, write_ms, frequency_hz):
+def wire_ms_spi(n_data, frequency_hz, n_flow=2):
+    """The same estimate for SPIMCI, whose framing and bit count both differ.
+
+    Appendix B.3.7 frames every transaction as a 4 byte control word, N flow
+    control bytes and the payload, and SPI has no acknowledge bit, so a byte is
+    8 clocks rather than 9.
+    """
+    return (4 + n_flow + n_data) * 8 / frequency_hz * 1000
+
+
+def _budget(image_bytes, block, access, write_ms, frequency_hz, spi=False):
     blocks, per_block = math.ceil(image_bytes / block), math.ceil(block / access)
-    bus = blocks * per_block * wire_ms(access, frequency_hz) / 1000
+    one = wire_ms_spi(access, frequency_hz) if spi else wire_ms(access, frequency_hz)
+    bus = blocks * per_block * one / 1000
     return blocks, per_block, bus, blocks * write_ms / 1000
 
 
@@ -844,29 +857,48 @@ def cmd_budget(args):
     """Print the firmware update time budget. No hardware."""
     image_bytes, write_ms = args.image_kib * 1024, args.write_ms
     rows = [
-        ("I2CMCI 400 kHz, LPL 0103h", LPL_BLOCK, WRITE_NMAX, 400_000),
-        ("I3C SDR 12.5 Mb/s, LPL 0103h", LPL_BLOCK, WRITE_NMAX, 12_500_000),
-        ("I2CMCI 400 kHz, EPL 0104h", EPL_BLOCK, EPL_ACCESS, 400_000),
-        ("I3C SDR 12.5 Mb/s, EPL 0104h", EPL_BLOCK, EPL_ACCESS, 12_500_000),
+        ("I2CMCI 400 kHz, LPL 0103h", LPL_BLOCK, WRITE_NMAX, 400_000, False),
+        ("I3C SDR 12.5 Mb/s, LPL 0103h", LPL_BLOCK, WRITE_NMAX, 12_500_000, False),
+        ("SPIMCI 1 MHz, LPL 0103h", LPL_BLOCK, WRITE_NMAX, 1_000_000, True),
+        ("I2CMCI 400 kHz, EPL 0104h", EPL_BLOCK, EPL_ACCESS, 400_000, False),
+        ("I3C SDR 12.5 Mb/s, EPL 0104h", EPL_BLOCK, EPL_ACCESS, 12_500_000, False),
+        ("SPIMCI 1 MHz, EPL 0104h", EPL_BLOCK, SPI_MAX_TRANSFER, 1_000_000, True),
+        ("SPIMCI 50 MHz, EPL 0104h", EPL_BLOCK, SPI_MAX_TRANSFER, 50_000_000, True),
     ]
     print(f"Firmware update budget, {image_bytes / 1024:.0f} KiB image, "
           f"tWRITE {write_ms:.0f} ms per block")
     print(f"  {'path':<30}{'blocks':>8}{'per block':>12}{'bus':>10}{'hold-off':>12}{'total':>10}")
-    totals = []
-    for label, block, access, frequency in rows:
-        blocks, per_block, bus, holdoff = _budget(image_bytes, block, access, write_ms, frequency)
-        totals.append(bus + holdoff)
+    totals, per_blocks = {}, {}
+    for label, block, access, frequency, spi in rows:
+        blocks, per_block, bus, holdoff = _budget(
+            image_bytes, block, access, write_ms, frequency, spi)
+        totals[label] = bus + holdoff
+        per_blocks[label] = per_block
         print(f"  {label:<30}{blocks:>8}{per_block:>9} txn{bus:>8.2f} s{holdoff:>10.2f} s"
               f"{bus + holdoff:>9.2f} s")
 
-    slow, clock_only, payload_only, fast = totals[0], totals[1], totals[2], totals[3]
+    slow = totals["I2CMCI 400 kHz, LPL 0103h"]
+    clock_only = totals["I3C SDR 12.5 Mb/s, LPL 0103h"]
+    payload_only = totals["I2CMCI 400 kHz, EPL 0104h"]
+    fast = totals["I3C SDR 12.5 Mb/s, EPL 0104h"]
+    spi_fast = totals["SPIMCI 50 MHz, EPL 0104h"]
     print(f"\n  Bus clock alone, 400 kHz to 12.5 Mb/s, about 31 times the wire speed: "
           f"{slow / clock_only:.2f} times faster.")
     print(f"  Payload size alone, LPL to EPL at 400 kHz: {slow / payload_only:.1f} times faster.")
     print(f"  Both together: {slow / fast:.1f} times faster.")
+    print(f"  SPIMCI at 50 MHz, 125 times the I2C wire speed and one transaction per "
+          f"block: {slow / spi_fast:.1f} times faster.")
     print("\n  The hold-off column is what moves the total, and it is not a property of")
     print("  the wire. It shrinks because a larger block means fewer blocks, each")
     print("  paying tWRITE once.")
+    epl_paged = per_blocks["I3C SDR 12.5 Mb/s, EPL 0104h"]
+    epl_spi = per_blocks["SPIMCI 1 MHz, EPL 0104h"]
+    print("\n  The transactions per block column is the other thing a host feels,")
+    print("  because every transaction costs a host round trip whatever the bus is")
+    print(f"  doing. An Extended Payload block is {epl_paged} transactions on I2CMCI and on")
+    print(f"  I3C, which cap an access at one page, and {epl_spi} on SPIMCI, which carries")
+    print(f"  {SPI_MAX_TRANSFER} bytes in a single transaction. Section 5 measures what a")
+    print("  transaction costs on the host side, and it is not small.")
     print("\n  These are arithmetic from the CMIS Table 10-4 maxima and the access")
     print("  limits in section 5.2.2, not measurements. Run 'timing' against a module")
     print("  to find out which hold-offs it actually takes.")
