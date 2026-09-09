@@ -99,9 +99,6 @@ CM_ BO_ 1537 "First byte echoes the command, so a reply matches its request with
 
 
 VAL_ 1537 Command 1 "INFO" 2 "COUNTERS" 3 "SET_RATE" 255 "ERROR" ;
-
-
-
 BA_DEF_ BO_  "VFrameFormat" ENUM  "StandardCAN","ExtendedCAN","reserved","J1939PG","StandardCAN_FD","ExtendedCAN_FD";
 BA_DEF_DEF_  "VFrameFormat" "StandardCAN";
 BA_ "VFrameFormat" BO_ 512 4;

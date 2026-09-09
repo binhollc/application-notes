@@ -103,7 +103,14 @@ extra = [
     'BA_DEF_DEF_  "VFrameFormat" "StandardCAN";',
 ]
 extra += [f'BA_ "VFrameFormat" BO_ {i} 4;' for i in FD_IDS]   # 4 = StandardCAN_FD
-text = text.rstrip("\n") + "\n" + "\n".join(extra) + "\n"
+
+# DBC is a CRLF format and cantools emits CRLF, so the appended lines have to
+# match or the shipped file has mixed line endings. Work in LF and convert the
+# whole file once at the end, which keeps this independent of what cantools
+# happens to emit and of the platform the generator runs on.
+text = text.replace("\r\n", "\n").rstrip("\n")
+text = "\n".join([text] + extra) + "\n"
+text = text.replace("\n", "\r\n")
 
 # Default to the DBC that ships beside this script, so running it with no
 # argument regenerates the shipped file in place and the self-check below runs
@@ -112,7 +119,7 @@ if len(sys.argv) > 2:
     raise SystemExit("usage: generate_dbc.py [output.dbc]")
 path = sys.argv[1] if len(sys.argv) == 2 else os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "binho_canfd_demo.dbc")
-with open(path, "w", encoding="utf-8", newline="\n") as handle:
+with open(path, "w", encoding="utf-8", newline="") as handle:   # text is CRLF already
     handle.write(text)
 print(f"  wrote {path}")
 
