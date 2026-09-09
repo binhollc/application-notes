@@ -19,3 +19,9 @@
 *.zip binary
 *.bin binary
 *.hex binary
+
+# DBC databases carry CRLF because that is what the format's tooling emits, and
+# cantools writes them that way. A note that ships a generated DBC states that
+# regenerating it reproduces the file byte for byte, so normalising it here
+# would make that claim false on the first commit.
+*.dbc -text
