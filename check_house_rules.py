@@ -110,9 +110,19 @@ def check_asset_copies(root, note, folder):
             # byte-copy rule only governs the shared series utility.
             continue
         checks += 1
-        a = hashlib.md5(tool.read_bytes()).hexdigest()
-        b = hashlib.md5(canonical.read_bytes()).hexdigest()
-        if a != b:
+        shipped = tool.read_bytes()
+        source = canonical.read_bytes()
+        if hashlib.md5(shipped).hexdigest() == hashlib.md5(source).hexdigest():
+            continue
+        # Say which kind of difference it is. A CRLF working tree produces this
+        # failure with no difference in content at all, and reads as drift in
+        # the utility, which sends you looking for a change that is not there.
+        # .gitattributes pins eol=lf so it should not happen, but a file written
+        # by a script that ignored that still can.
+        if shipped.replace(b"\r\n", b"\n") == source.replace(b"\r\n", b"\n"):
+            fail(note, f"assets/{tool.name} matches _shared/tools/{tool.name} "
+                       f"except for line endings; write it as LF")
+        else:
             fail(note, f"assets/{tool.name} is not a byte copy of _shared/tools/{tool.name}")
 
 
@@ -132,7 +142,10 @@ def main(argv):
         if not md.exists():
             fail(note, f"expected {md.name} in {folder.name}")
             continue
-        text = md.read_text(encoding="utf-8")
+        # Decode the bytes rather than read_text(): read_text() opens in text
+        # mode, so universal newlines turns CRLF into LF before this code sees
+        # it and the line-ending check below can never fire.
+        text = md.read_bytes().decode("utf-8")
         check_front_matter(note, text, md.name)
         check_characters(note, text)
         check_tables(note, text)
