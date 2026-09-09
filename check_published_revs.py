@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Check that the CDN serves every published note, at its current revision.
 
-Published blog posts link to fixed, unversioned CDN URLs, so there are two
-separate ways a reader can be let down and they fail differently:
+Published blog posts link to fixed, unversioned CDN URLs, so a reader can be
+let down in three ways, and only the first is visible from the link:
 
-  resolves    the URL returns 200 rather than 404, so the link is not broken
-  current     the object behind it was built from the revision in this repo
+  broken          the URL 404s
+  stale rev       the rev was bumped here and never republished, so the URL
+                  answers 200 with the previous document
+  silent drift    the source was edited without bumping the rev, so nothing
+                  about either document says which one a reader is holding
 
-A note whose rev is bumped here without a republish keeps answering 200 while
-handing readers the previous document. That is the failure this catches, and it
-is invisible from the link alone.
+The last is the quiet one, and it is why this compares the published Markdown
+byte for byte with the source rather than only comparing rev numbers. Both had
+already happened: AN0002 through AN0005 sat a revision behind after a rev bump
+with no republish, and AN0001 had a trademarks block added to its front matter
+and was never republished, still calling itself rev 1.0 on both sides.
 
 The published revision is read out of the assets archive, not the PDF. The
 archive carries the note's own Markdown, so its `rev:` is the revision that was
@@ -58,23 +63,30 @@ def fetch(url):
         return response.status, response.read()
 
 
-def published_rev(note):
-    """The rev recorded in the Markdown inside the published assets archive."""
+def published_markdown(note):
+    """The note's Markdown as it exists inside the published assets archive.
+
+    Returns (rev, raw bytes, error). The bytes matter as much as the rev: a
+    source edit that does not bump the rev leaves the published artifact behind
+    with both revisions reading the same, which no comparison of rev numbers
+    can see. AN0001 sat in exactly that state, a trademarks block added to its
+    front matter and never republished, still calling itself rev 1.0.
+    """
     status, body = fetch(f"{BASE}/{note}/{note}-assets.zip")
     if status != 200:
-        return None, f"assets archive returned HTTP {status}"
+        return None, None, f"assets archive returned HTTP {status}"
     try:
         with zipfile.ZipFile(io.BytesIO(body)) as archive:
             for name in archive.namelist():
                 if name.endswith(f"{note}.md"):
-                    text = archive.read(name).decode("utf-8", "replace")
-                    rev = rev_of(text)
+                    raw = archive.read(name)
+                    rev = rev_of(raw.decode("utf-8", "replace"))
                     if rev is None:
-                        return None, f"no 'rev:' in {name} inside the archive"
-                    return rev, None
+                        return None, raw, f"no 'rev:' in {name} inside the archive"
+                    return rev, raw, None
     except zipfile.BadZipFile:
-        return None, f"assets archive is not a readable zip ({len(body):,} bytes)"
-    return None, f"archive holds no {note}.md"
+        return None, None, f"assets archive is not a readable zip ({len(body):,} bytes)"
+    return None, None, f"archive holds no {note}.md"
 
 
 def main(argv):
@@ -98,7 +110,8 @@ def main(argv):
             problems.append(f"{note}: no {note}.md in {folder.name}")
             continue
 
-        source = rev_of(md.read_bytes().decode("utf-8"))
+        source_bytes = md.read_bytes()
+        source = rev_of(source_bytes.decode("utf-8"))
         if source is None:
             problems.append(f"{note}: no 'rev:' in {md.name}")
             continue
@@ -123,7 +136,7 @@ def main(argv):
             pdf_note = ", PDF unreachable"
 
         try:
-            got, why = published_rev(note)
+            got, got_bytes, why = published_markdown(note)
         except (urllib.error.URLError, OSError) as exc:
             problems.append(f"{note}: assets archive did not fetch ({exc})")
             print(f"  {note:<8}{source:>8}{'?':>11}   NOT REACHABLE")
@@ -136,6 +149,15 @@ def main(argv):
             problems.append(f"{note}: source is rev {source} but the CDN "
                             f"serves rev {got}")
             verdict = "PUBLISHED IS BEHIND THE SOURCE"
+        elif got_bytes != source_bytes:
+            # Same rev, different document. Whoever edited the source did not
+            # bump the rev, so there is no revision number that distinguishes
+            # what readers have from what this repository says they have.
+            problems.append(f"{note}: the CDN and the source both say rev "
+                            f"{source} but the published document differs from "
+                            f"the source; decide whether this warrants a rev "
+                            f"bump, then republish")
+            verdict = "EDITED WITHOUT A REV BUMP"
         else:
             verdict = "current"
         print(f"  {note:<8}{source:>8}{got or '?':>11}   {verdict}{pdf_note}")
