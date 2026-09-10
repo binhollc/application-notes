@@ -47,6 +47,9 @@ TOOL_VERSION = "1.0"
 NACK_ADDRESS = "FW_I2C_NACK_ADDRESS"
 NACK_BYTE = "FW_I2C_NACK_BYTE"
 
+# An empty bus. Firmware answers a scan with this instead of an empty list.
+NO_TARGETS = "FW_I2C_BUS_WITH_NO_TARGETS_CONNECTED"
+
 EXPECTED_COLUMNS = ["Time [s]", "Packet ID", "Address", "Data", "Read/Write", "ACK/NAK"]
 
 
@@ -271,7 +274,20 @@ class Bus:
         return self.i2c.read(address=address, length=length)
 
     def scan(self):
-        return [int(a) for a in self.i2c.scan().addresses_7bit]
+        """Addresses answering on the bus, empty when none do.
+
+        Firmware reports an empty bus as FW_I2C_BUS_WITH_NO_TARGETS_CONNECTED
+        rather than an empty list. That is an answer, not a failure, so it is
+        translated here -- and it is worth knowing that a pull-up too strong for
+        the target to overcome produces the same status as an unplugged cable.
+        """
+        try:
+            return [int(a) for a in self.i2c.scan().addresses_7bit]
+        except Exception as exc:
+            code = getattr(exc, "status_code", None)
+            if getattr(code, "name", None) == NO_TARGETS:
+                return []
+            raise
 
 
 # --------------------------------------------------------------------------
@@ -675,6 +691,29 @@ def cmd_selfcheck(args):
     assert "different bytes" in outcomes[0].detail
     checks += 1
 
+    # An empty bus is a scan result, not a crash; anything else still raises.
+    class Scanner:
+        def __init__(self, status_name):
+            self.status_name = status_name
+
+        def scan(self, **kwargs):
+            exc = RuntimeError(self.status_name)
+            exc.status_code = type("StatusCode", (), {"name": self.status_name})()
+            raise exc
+
+    empty = Bus.__new__(Bus)
+    empty.i2c = Scanner(NO_TARGETS)
+    assert empty.scan() == []
+    other = Bus.__new__(Bus)
+    other.i2c = Scanner("FW_I2C_ARBITRATION_LOST")
+    try:
+        other.scan()
+    except RuntimeError as exc:
+        assert "ARBITRATION" in str(exc)
+        checks += 1
+    else:
+        raise AssertionError("a non-empty-bus scan failure must not be swallowed")
+
     print(f"i2c_replay.py {TOOL_VERSION} self-check: {checks}/{checks} OK")
     return 0
 
@@ -745,6 +784,15 @@ def main(argv=None):
         return args.func(args)
     except ReplayError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        # An SDK CosmicError carries a status_code; anything that does is a
+        # device or bus condition and belongs on one line, not in a traceback.
+        code = getattr(exc, "status_code", None)
+        if code is None:
+            raise
+        name = getattr(code, "name", None) or f"0x{code:04X}"
+        print(f"error: {name}: {exc}", file=sys.stderr)
         return 2
 
 
