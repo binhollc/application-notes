@@ -1,4 +1,4 @@
-# Build the AN0012 replay utility against an installed CosmicSDK.
+# Build the AN0013 replay utility against an installed CosmicSDK.
 #
 #   cmake -B build -DCOSMICSDK_ROOT=/path/to/cosmicsdk
 #   cmake --build build
@@ -10,7 +10,7 @@
 # the same layout under its staging/ directory.
 
 cmake_minimum_required(VERSION 3.16)
-project(an0012_i2c_replay CXX)
+project(an0013_i2c_replay CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

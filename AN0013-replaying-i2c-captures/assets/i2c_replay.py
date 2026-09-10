@@ -650,7 +650,7 @@ _WRONG_FILE = """name,type,start_time,duration
 
 
 # The shape a real Logic 2 legacy export actually has, taken verbatim from a
-# Logic Pro 8 capture of the AN0012 bench: EVERY data row carries Packet ID 0,
+# Logic Pro 8 capture of the AN0013 bench: EVERY data row carries Packet ID 0,
 # only the address-NAK row carries none, and a sub-addressed read appears as a
 # pointer write and a read sharing that same useless packet id. Grouping by
 # Packet ID merges all of it into one twelve-byte write, which is what this
