@@ -37,6 +37,7 @@ nor an adapter, so a capture can be inspected anywhere.
 import argparse
 import csv
 import io
+import statistics
 import sys
 import time
 
@@ -63,7 +64,13 @@ class ReplayError(RuntimeError):
 
 
 class Transaction:
-    """One START-to-STOP transaction recovered from the capture."""
+    """One transaction phase recovered from the capture.
+
+    A phase is a run of bytes in one direction to one address. A capture's
+    sub-addressed read is two phases -- the pointer write and the read -- joined
+    on the wire by a repeated START rather than separated by a STOP, which is
+    what `held` records.
+    """
 
     def __init__(self, address, read, time_s, packet_id=None):
         self.address = address
@@ -76,6 +83,9 @@ class Transaction:
         self.nak_at = None
         self.address_nak = False
         self.missing_ack = False
+        # True when the next phase followed without a STOP: the capture shows a
+        # repeated START, so replaying this phase must hold the bus.
+        self.held = False
 
     @property
     def direction(self):
@@ -105,7 +115,7 @@ class Transaction:
 
     def __repr__(self):
         return (f"<{self.direction} 0x{self.address:02X} "
-                f"{len(self.data)}B nak_at={self.nak_at}>")
+                f"{len(self.data)}B nak_at={self.nak_at} held={self.held}>")
 
     def describe(self):
         body = " ".join(f"{b:02X}" for b in self.data) or "-"
@@ -116,6 +126,8 @@ class Transaction:
             line += f"   [captured: NAK at byte {self.nak_at}]"
         if self.missing_ack:
             line += "   [captured: missing ACK/NAK]"
+        if self.held:
+            line += "   [repeated START, bus held]"
         return line
 
 
@@ -129,8 +141,8 @@ def _number(text):
     return int(text, 0)
 
 
-def parse_capture(handle):
-    """Turn a Saleae I2C analyzer CSV export into a list of Transactions."""
+def _read_rows(handle):
+    """Validate the header and return the export's rows, parsed but ungrouped."""
     reader = csv.DictReader(handle)
     if reader.fieldnames is None:
         raise ReplayError("the capture is empty")
@@ -138,50 +150,121 @@ def parse_capture(handle):
     if missing:
         raise ReplayError(
             "this does not look like a Saleae I2C analyzer export -- missing "
-            f"column(s) {', '.join(missing)}. Found: {', '.join(reader.fieldnames)}"
+            f"column(s) {', '.join(missing)}. Found: {', '.join(reader.fieldnames)}. "
+            "Logic 2 writes two different CSVs: use the analyzer's own export "
+            "(legacy_export_analyzer, or Export in the analyzer's menu), not the "
+            "data table."
         )
+
+    rows = []
+    for line_no, row in enumerate(reader, start=2):
+        raw_data = (row["Data"] or "").strip()
+        try:
+            rows.append({
+                "line": line_no,
+                "time": float((row["Time [s]"] or "0").strip()),
+                "packet": (row["Packet ID"] or "").strip(),
+                "address": _number(row["Address"]),
+                "byte": _number(raw_data) if raw_data else None,
+                "read": (row["Read/Write"] or "").strip().lower().startswith("r"),
+                "ack": (row["ACK/NAK"] or "").strip(),
+            })
+        except ValueError as exc:
+            raise ReplayError(f"line {line_no}: {exc}") from None
+    return rows
+
+
+def _gap_threshold(rows, gap_factor, gap_seconds):
+    """Where to cut between one transaction and the next, in seconds.
+
+    The export has one row per byte and no STOP column, so the only thing that
+    separates two same-direction writes to one address is the silence between
+    them. That silence is measured rather than assumed: a byte on the wire takes
+    as long as the bus clock says, so the cut is a multiple of the median
+    inter-byte gap in this capture. On the bench that median was 95 us at
+    100 kHz while the gap between transactions was 11.6 ms, two orders apart.
+
+    The default factor of 8 comes from three measured separations in that same
+    capture: 95 us between bytes of one phase, **203 us across a repeated
+    START** (the START plus the re-sent address byte cost about two byte times),
+    and 11.6 ms between transactions. The cut has to land above the second and
+    far below the third, so anything from roughly 250 us to 11 ms works and 8x
+    (760 us) sits in the middle of those two orders of magnitude. A factor of 3
+    would put the cut at 287 us, only 1.4x above the repeated-START gap, and a
+    slightly slower bus would start reading repeated STARTs as STOPs.
+
+    Pass gap_seconds to override when a capture's own pacing defeats the
+    heuristic -- a target that clock-stretches for longer than the cut, for
+    instance, would otherwise split one transaction into two.
+    """
+    if gap_seconds is not None:
+        return gap_seconds
+    deltas = []
+    previous = None
+    for row in rows:
+        if row["byte"] is None:
+            previous = None
+            continue
+        if previous is not None:
+            delta = row["time"] - previous
+            if delta > 0:
+                deltas.append(delta)
+        previous = row["time"]
+    if len(deltas) < 2:
+        return float("inf")            # nothing to calibrate against
+    return statistics.median(deltas) * gap_factor
+
+
+def parse_capture(handle, gap_factor=8.0, gap_seconds=None):
+    """Turn a Saleae I2C analyzer CSV export into a list of Transactions."""
+    rows = _read_rows(handle)
+    threshold = _gap_threshold(rows, gap_factor, gap_seconds)
+
+    # Packet ID groups nothing in a real Logic export: measured on a Logic Pro 8
+    # capture, all 395 data rows carried Packet ID 0 while the 30 address-NAK
+    # rows carried none. Honor the column only where it actually varies.
+    packets = {r["packet"] for r in rows if r["packet"]}
+    use_packet = len(packets) > 1
 
     transactions = []
     current = None
-    current_key = None
+    previous_time = None
 
-    for line_no, row in enumerate(reader, start=2):
-        packet_id = (row["Packet ID"] or "").strip()
-        raw_data = (row["Data"] or "").strip()
-        ack = (row["ACK/NAK"] or "").strip()
-        read = (row["Read/Write"] or "").strip().lower().startswith("r")
-        try:
-            address = _number(row["Address"])
-            time_s = float((row["Time [s]"] or "0").strip())
-        except ValueError as exc:
-            raise ReplayError(f"line {line_no}: {exc}") from None
-
+    for row in rows:
         # An address-NAK row carries no data byte: the analyzer writes the
         # address line out on its own precisely because nothing followed it.
-        if not raw_data:
-            txn = Transaction(address, read, time_s, packet_id or None)
+        if row["byte"] is None:
+            txn = Transaction(row["address"], row["read"], row["time"],
+                              row["packet"] or None)
             txn.address_nak = True
-            txn.missing_ack = ack == "Missing ACK/NAK"
+            txn.missing_ack = row["ack"] == "Missing ACK/NAK"
             transactions.append(txn)
-            current, current_key = None, None
+            current, previous_time = None, None
             continue
 
-        # Group by Packet ID where the analyzer supplied one. Where it did not,
-        # a change of address or direction starts a new transaction.
-        key = ("pid", packet_id) if packet_id else ("run", address, read)
-        if current is None or key != current_key:
-            current = Transaction(address, read, time_s, packet_id or None)
-            current_key = key
+        gap = None if previous_time is None else row["time"] - previous_time
+        split = (
+            current is None
+            or row["address"] != current.address
+            or row["read"] != current.read
+            or (gap is not None and gap > threshold)
+            or (use_packet and (row["packet"] or None) != current.packet_id)
+        )
+        if split:
+            if current is not None and gap is not None and gap <= threshold:
+                # Contiguous on the wire but a different phase: the capture
+                # shows a repeated START, so the previous phase kept the bus.
+                current.held = True
+            current = Transaction(row["address"], row["read"], row["time"],
+                                  row["packet"] or None)
             transactions.append(current)
 
-        try:
-            current.data.append(_number(raw_data))
-        except ValueError as exc:
-            raise ReplayError(f"line {line_no}: {exc}") from None
+        current.data.append(row["byte"])
+        previous_time = row["time"]
 
-        if ack == "Missing ACK/NAK":
+        if row["ack"] == "Missing ACK/NAK":
             current.missing_ack = True
-        elif ack != "ACK" and current.nak_at is None:
+        elif row["ack"] != "ACK" and current.nak_at is None:
             current.nak_at = len(current.data) - 1
 
     return transactions
@@ -267,11 +350,11 @@ class Bus:
             self._device.close()
         return False
 
-    def write(self, address, data):
-        self.i2c.write(address=address, data=bytes(data))
+    def write(self, address, data, non_stop=False):
+        self.i2c.write(address=address, data=bytes(data), non_stop=non_stop)
 
-    def read(self, address, length):
-        return self.i2c.read(address=address, length=length)
+    def read(self, address, length, non_stop=False):
+        return self.i2c.read(address=address, length=length, non_stop=non_stop)
 
     def scan(self):
         """Addresses answering on the bus, empty when none do.
@@ -333,7 +416,8 @@ def replay(adapter, transactions, pace=False, stop_on_nak=False, skip_captured_n
 
     The payload is replayed exactly as captured, register-pointer byte included,
     because the export does not distinguish a sub-address from the data that
-    follows it and neither should the wire.
+    follows it and neither should the wire. A phase the capture shows as held by
+    a repeated START is replayed with non_stop, so the framing survives too.
     """
     outcomes = []
     previous_time = None
@@ -354,7 +438,8 @@ def replay(adapter, transactions, pace=False, stop_on_nak=False, skip_captured_n
         outcome = Outcome(txn)
         try:
             if txn.read:
-                returned = bytes(adapter.read(txn.address, len(txn.data)))
+                returned = bytes(adapter.read(txn.address, len(txn.data),
+                                              non_stop=txn.held))
                 outcome.returned = returned
                 if returned == bytes(txn.data):
                     outcome.detail = "same bytes as the capture"
@@ -364,7 +449,7 @@ def replay(adapter, transactions, pace=False, stop_on_nak=False, skip_captured_n
                         f"{' '.join(f'{b:02X}' for b in txn.data) or '-'} -> now "
                         f"{' '.join(f'{b:02X}' for b in returned) or '-'}")
             else:
-                adapter.write(txn.address, bytes(txn.data))
+                adapter.write(txn.address, bytes(txn.data), non_stop=txn.held)
         except ReplayError:
             raise
         except Exception as exc:                      # an SDK CosmicError
@@ -394,15 +479,17 @@ def _bus_from_args(args):
 
 def cmd_parse(args):
     with open(args.capture, newline="") as handle:
-        transactions = parse_capture(handle)
+        transactions = parse_capture(handle, gap_factor=args.gap_factor,
+                                     gap_seconds=args.gap_seconds)
     writes = sum(1 for t in transactions if not t.read)
     reads = len(transactions) - writes
     naks = sum(1 for t in transactions if t.refused)
     payload = sum(len(t.data) for t in transactions)
 
+    held = sum(1 for t in transactions if t.held)
     print(f"{args.capture}: {len(transactions)} transactions "
           f"({writes} write, {reads} read), {payload} payload bytes, "
-          f"{naks} refused in the capture")
+          f"{naks} refused in the capture, {held} held by a repeated START")
     if transactions:
         span = transactions[-1].time_s - transactions[0].time_s
         print(f"capture spans {span:.6f} s")
@@ -415,7 +502,8 @@ def cmd_parse(args):
 
 def cmd_replay(args):
     with open(args.capture, newline="") as handle:
-        transactions = parse_capture(handle)
+        transactions = parse_capture(handle, gap_factor=args.gap_factor,
+                                     gap_seconds=args.gap_seconds)
     if not transactions:
         raise ReplayError("nothing to replay")
 
@@ -561,6 +649,30 @@ _WRONG_FILE = """name,type,start_time,duration
 """
 
 
+# The shape a real Logic 2 legacy export actually has, taken verbatim from a
+# Logic Pro 8 capture of the AN0012 bench: EVERY data row carries Packet ID 0,
+# only the address-NAK row carries none, and a sub-addressed read appears as a
+# pointer write and a read sharing that same useless packet id. Grouping by
+# Packet ID merges all of it into one twelve-byte write, which is what this
+# fixture exists to prevent.
+_REAL_EXPORT = f"""{_HEADER}
+0.007708480,0,0x50,0x00,Write,ACK
+0.007911200,0,0x50,0xDE,Read,ACK
+0.008009760,0,0x50,0xAD,Read,ACK
+0.008108480,0,0x50,0xBE,Read,ACK
+0.008203840,0,0x50,0xEF,Read,NAK
+0.019485920,,0x62,,Write,NAK
+0.051083680,0,0x50,0x00,Write,ACK
+0.051178400,0,0x50,0xDE,Write,ACK
+0.051274080,0,0x50,0xAD,Write,ACK
+0.051373120,0,0x50,0xBE,Write,ACK
+0.051468160,0,0x50,0xEF,Write,ACK
+0.063084000,0,0x50,0x04,Write,ACK
+0.063179200,0,0x50,0x11,Write,ACK
+0.063274400,0,0x50,0x22,Write,ACK
+"""
+
+
 def _parse(text):
     return parse_capture(io.StringIO(text))
 
@@ -650,10 +762,10 @@ def cmd_selfcheck(args):
             exc.status_code = code
             raise exc
 
-        def write(self, address, data):
+        def write(self, address, data, non_stop=False):
             self._raise()
 
-        def read(self, address, length):
+        def read(self, address, length, non_stop=False):
             self._raise()
 
     both = _parse(_CLEAN_WRITE) + _parse(_DATA_NAK)
@@ -677,12 +789,16 @@ def cmd_selfcheck(args):
                       skip_captured_naks=False)) == 1
     checks += 1
 
-    # A read whose answer changed is reported as changed, not as a failure.
     class Answering:
-        def write(self, address, data):
+        def __init__(self):
+            self.held = []
+
+        def write(self, address, data, non_stop=False):
+            self.held.append(non_stop)
             return None
 
-        def read(self, address, length):
+        def read(self, address, length, non_stop=False):
+            self.held.append(non_stop)
             return b"\x00" * length
 
     outcomes = replay(Answering(), _parse(_READ))
@@ -714,6 +830,46 @@ def cmd_selfcheck(args):
     else:
         raise AssertionError("a non-empty-bus scan failure must not be swallowed")
 
+    # The real-export shape: Packet ID carries nothing, so grouping has to come
+    # from direction, address and the silence between bytes.
+    txns = _parse(_REAL_EXPORT)
+    assert len(txns) == 5, [str(t) for t in txns]
+    assert not txns[0].read and bytes(txns[0].data) == b"\x00"
+    assert txns[0].held, "the pointer write is joined to the read by a repeated START"
+    assert txns[1].read and bytes(txns[1].data) == b"\xDE\xAD\xBE\xEF"
+    assert txns[1].terminating_nak and not txns[1].refused
+    assert not txns[1].held
+    assert txns[2].address_nak and txns[2].address == 0x62
+    assert bytes(txns[3].data) == b"\x00\xDE\xAD\xBE\xEF"
+    assert not txns[3].held, "11.6 ms of silence is a STOP, not a repeated START"
+    assert bytes(txns[4].data) == b"\x04\x11\x22"
+    assert sum(1 for t in txns if t.refused) == 1     # only the 0x62 address NAK
+    checks += 1
+
+    # The cut is a knob, and moving it changes the reading in both directions.
+    # Too tight and the repeated START reads as a STOP; wide open and the whole
+    # capture collapses into one phase per direction change.
+    # 150 us sits between the 95 us byte gap and the 203 us repeated START: the
+    # phases stay correct but the framing is lost, which is the subtle failure.
+    tight = parse_capture(io.StringIO(_REAL_EXPORT), gap_seconds=0.00015)
+    assert len(tight) == 5, [str(t) for t in tight]
+    assert not tight[0].held, "at 150 us the repeated START reads as a STOP"
+    # 50 us is below the byte gap, so every byte becomes its own phase.
+    shredded = parse_capture(io.StringIO(_REAL_EXPORT), gap_seconds=0.00005)
+    assert len(shredded) > 10, len(shredded)
+    assert all(len(t.data) <= 1 for t in shredded)
+    wide = parse_capture(io.StringIO(_REAL_EXPORT), gap_seconds=1.0)
+    assert len(wide) == 4, [str(t) for t in wide]     # the two writes merge
+    assert bytes(wide[3].data) == b"\x00\xDE\xAD\xBE\xEF\x04\x11\x22"
+    checks += 1
+
+    # A held phase must be replayed with non_stop, or the wire gets a STOP the
+    # capture never had.
+    answering = Answering()
+    replay(answering, _parse(_REAL_EXPORT))
+    assert answering.held[:2] == [True, False], answering.held
+    checks += 1
+
     print(f"i2c_replay.py {TOOL_VERSION} self-check: {checks}/{checks} OK")
     return 0
 
@@ -729,6 +885,12 @@ def main(argv=None):
     parent.add_argument("--bus", default="A", help="I2C bus, A or B (default A)")
     parent.add_argument("--frequency", type=int, default=100_000,
                         help="I2C clock in Hz (default 100000)")
+    parent.add_argument("--gap-factor", type=float, default=8.0,
+                        help="split transactions at a silence this many times the "
+                             "capture's median inter-byte gap (default 8.0)")
+    parent.add_argument("--gap-seconds", type=float, default=None,
+                        help="split at this absolute silence in seconds instead, "
+                             "for a capture whose own pacing defeats the median")
     parent.add_argument("--pullup", default="KOHM_2_2",
                         help="I2cPullUp member name (default KOHM_2_2). A pull-up "
                              "stronger than about 470 ohms can make an armed "
