@@ -1,0 +1,27 @@
+# Line endings are LF everywhere, in the repository and in the working tree.
+#
+# This is not a style preference. Two things in this repository compare bytes:
+# check_house_rules.py requires a note's assets/<tool>.py to be a byte copy of
+# _shared/tools/<tool>.py, and the published assets archive is expected to hold
+# the same bytes the repository does. The Git for Windows installer sets
+# core.autocrlf=true at system scope, so a plain clone on Windows rewrites the
+# working tree to CRLF. Any file a script then rewrites with LF stops matching
+# its checked-out counterpart, and the byte comparison fails for a reason that
+# has nothing to do with the file's content. Pinning eol=lf here overrides
+# core.autocrlf whatever the machine is configured to do, so the check means
+# what it says on every platform.
+* text=auto eol=lf
+
+# Built artifacts and vendor binaries: no normalisation, no eol conversion.
+# The firmware .hex and .bin files are shipped to readers as the vendor
+# released them, so nothing may rewrite a byte of them.
+*.pdf binary
+*.zip binary
+*.bin binary
+*.hex binary
+
+# DBC databases carry CRLF because that is what the format's tooling emits, and
+# cantools writes them that way. A note that ships a generated DBC states that
+# regenerating it reproduces the file byte for byte, so normalising it here
+# would make that claim false on the first commit.
+*.dbc -text
