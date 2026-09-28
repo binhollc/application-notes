@@ -167,6 +167,22 @@ def smbus_discovery(i3c, addresses):
     return found
 
 
+def set_pulsar_pull_up(serial, pull_up):
+    """Reference bench only: the SMBus pull-ups come from a Binho Pulsar's I2C port."""
+    pul = p.Device.open(serial=None if serial == "any" else serial, model=p.DeviceModel.PULSAR)
+    try:
+        i2c = pul.i2c()
+        i2c.set_voltage(voltage_mv=3300)
+        try:
+            i2c.initialize(frequency_hz=100_000, pull_up=pull_up)
+        except p.CosmicError as e:
+            if "ALREADY" not in e.status_code.name:
+                raise
+            i2c.set_pull_up(pull_up)
+    finally:
+        pul.close()
+
+
 def smbus_reset(i3c, t2wrst_us):
     """Reset the SMBus interface: SCL low for T2wrst. Returns False when not asked for."""
     if not t2wrst_us:
@@ -178,6 +194,10 @@ def smbus_reset(i3c, t2wrst_us):
 
 
 def cmd_handoff(args):
+    def step(text):
+        print(text, flush=True)
+        time.sleep(args.step_delay_s)   # spaces the steps apart on a logic analyzer
+
     dev = p.Device.open(serial=args.serial, model=p.DeviceModel.SUPERNOVA)
     i3c = dev.i3c()
     try:
@@ -201,9 +221,9 @@ def cmd_handoff(args):
         if args.sda_pull_up:
             i3c.set_sda_pull_up(p.I3cSdaPullUp[args.sda_pull_up])
         acked = disec()
-        print(f"1. DISEC(DISHJ) to 7Eh: {'ACK, an I3C Basic device is present' if acked else 'NACK, SMBus only'}")
+        step(f"1. DISEC(DISHJ) to 7Eh: {'ACK, an I3C Basic device is present' if acked else 'NACK, SMBus only'}")
         state = i3c.enable_i2c_clock_stretching(args.khz * 1000)   # CCCs are refused from here on
-        print(f"2. SMBus discovery, stretching on, SCL {state.frequency_hz} Hz")
+        step(f"2. SMBus discovery, stretching on, SCL {state.frequency_hz} Hz")
         found = smbus_discovery(i3c, args.address)
         i3c.disable_i2c_clock_stretching()
         if not acked:
@@ -211,12 +231,15 @@ def cmd_handoff(args):
             smbus_reset(i3c, args.t2wrst_us)
             return 0 if found else 1
         if found and not args.no_smbus_only:
-            print("3. An SMBus-only device answered: reset the SMBus interface and stay in SMBus mode.")
+            step("3. An SMBus-only device answered: reset the SMBus interface and stay in SMBus mode.")
             print("   Pass --no-smbus-only if the devices found are the I3C Basic device itself.")
             smbus_reset(i3c, args.t2wrst_us)
             return 0
-        print(f"3. DISEC(DISHJ) to 7Eh again: {'ACK' if disec() else 'NACK'}")
-        if not args.yes:
+        step(f"3. DISEC(DISHJ) to 7Eh again: {'ACK' if disec() else 'NACK'}")
+        if args.pulsar_pull_up:
+            set_pulsar_pull_up(args.pulsar_pull_up, p.I2cPullUp.DISABLE)
+            step("4. SMBus pull-ups off (Pulsar), I3C Basic pull-up from the adapter's I3C engine")
+        elif not args.yes:
             input("4. Switch the external SMBus pull-up on SCL off, then press Enter "
                   "(the adapter's SDA pull-up follows the I3C engine) ")
         time.sleep(args.t_smb2i3c_ms / 1000)
@@ -225,22 +248,24 @@ def cmd_handoff(args):
         sub = dev.subscribe(p.I3cHotJoinNotification, joined.append)
         try:
             i3c.ccc.enec_broadcast(p.I3cEvent.HJ)
-            print(f"5. ENEC(ENHJ) to 7Eh at {args.i3c_voltage_mv} mV: ACK")
+            step(f"5. ENEC(ENHJ) to 7Eh at {args.i3c_voltage_mv} mV: ACK")
         except p.I3cError as e:
-            print(f"5. ENEC(ENHJ) to 7Eh at {args.i3c_voltage_mv} mV: {e.status_code.name}")
+            step(f"5. ENEC(ENHJ) to 7Eh at {args.i3c_voltage_mv} mV: {e.status_code.name}")
         deadline = time.monotonic() + args.hj_timeout_s
         while not joined and time.monotonic() < deadline:
             time.sleep(0.05)
         sub.unsubscribe()
         for n in joined:
-            print(f"6. Hot-Join: PID {bytes(n.pid).hex()} BCR 0x{n.bcr:02X} DCR 0x{n.dcr:02X} "
+            step(f"6. Hot-Join: PID {bytes(n.pid).hex()} BCR 0x{n.bcr:02X} DCR 0x{n.dcr:02X} "
                   f"dynamic address 0x{n.dynamic_address:02X}")
         if not joined:
-            print(f"6. No Hot-Join in {args.hj_timeout_s} s: continue detection, or reset and "
+            step(f"6. No Hot-Join in {args.hj_timeout_s} s: continue detection, or reset and "
                   "return to SMBus mode")
         return 0 if joined else 1
     finally:
         dev.close()
+        if args.pulsar_pull_up:
+            set_pulsar_pull_up(args.pulsar_pull_up, p.I2cPullUp.KOHM_1_0)
 
 
 def main(argv=None):
@@ -281,6 +306,11 @@ def main(argv=None):
     h.add_argument("--yes", action="store_true", help="do not stop for the pull-up switch")
     h.add_argument("--t2wrst-us", type=int, default=0,
                    help="SMBus reset: hold SCL low this long where the flow resets the interface")
+    h.add_argument("--step-delay-s", type=float, default=0.0,
+                   help="pause after each step, so the steps stand apart on a logic analyzer")
+    h.add_argument("--pulsar-pull-up", metavar="SERIAL",
+                   help="reference bench: the SMBus pull-ups come from this Pulsar ('any' for the only one); "
+                        "the script turns them off in step 4 and back to 1 kOhm at the end")
     h.add_argument("--sda-pull-up", choices=["AUTO", "OFF", "ON"],
                    help="adapter SDA pull-up during the SMBus phase (default: leave as is)")
     h.set_defaults(func=cmd_handoff)
