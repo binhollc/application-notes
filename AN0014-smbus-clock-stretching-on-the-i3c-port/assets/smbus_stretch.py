@@ -11,6 +11,14 @@ transfer and turns it off again.
     python smbus_stretch.py read  0x0B 2 --register 0x09
     python smbus_stretch.py write 0x2A 0x01 0x02 0x03
     python smbus_stretch.py sweep --address 0x2A
+    python smbus_stretch.py handoff --address 0x2A
+
+`handoff` runs the SMBus to I3C Basic detection flow of the PCI-SIG ECN
+"Chapter 12. Architectural Out-of-Band Management" as far as the adapter can:
+DISEC(DISHJ) to 7Eh, SMBus discovery (static addresses and ARP Get UDID with
+PEC), then, for a device that answered 7Eh, ENEC(ENHJ) and the Hot-Join.
+Switching the pull-ups and resetting the SMBus interface (SCL low for T2wrst,
+or SMRST#) are hardware steps the script asks you to do.
 
 `read` and `write` work with any target. `sweep` needs the reference target
 supplied with AN0014 (stretch_target_pic18q20.c): it tells the target how long
@@ -26,7 +34,10 @@ import time
 
 import pycosmicsdk as p
 
-TOOL_VERSION = "1.0"
+TOOL_VERSION = "1.1"
+
+ARP_ADDRESS = 0x61      # SMBus Device Default Address
+ARP_GET_UDID = 0x03     # general Get UDID: count 0x11, 16 UDID bytes, address, PEC
 
 # The reference target's protocol: [0xF0, lo, hi] sets the stretch in
 # microseconds, applied after every later address match; a read returns 0xA5.
@@ -40,6 +51,19 @@ SWEEP_US = (0, 50, 500, 2000, 10000, 30000)
 
 def number(text):
     return int(text, 0)
+
+
+def pec(data):
+    """SMBus PEC: CRC-8, polynomial x^8 + x^2 + x + 1, initial value 0."""
+    crc = 0
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else crc << 1
+    return crc
+
+
+assert pec(b"123456789") == 0xF4   # CRC-8/SMBUS check value
 
 
 def open_port(args):
@@ -120,13 +144,97 @@ def cmd_sweep(args):
     return 1 if failures else 0
 
 
+def smbus_discovery(i3c, addresses):
+    """Probe each static address with a one-byte read, then ARP Get UDID. Needs stretching on."""
+    found = []
+    for a in addresses:
+        try:
+            i3c.legacy_i2c_read(a, 1)
+            found.append(a)
+            print(f"  static 0x{a:02X}: ACK")
+        except p.I3cError as e:
+            print(f"  static 0x{a:02X}: {e.status_code.name}")
+    try:
+        r = i3c.legacy_i2c_read(ARP_ADDRESS, 19, subaddress=bytes([ARP_GET_UDID]))
+        frame = bytes([ARP_ADDRESS << 1, ARP_GET_UDID, (ARP_ADDRESS << 1) | 1]) + r[:-1]
+        ok = r[0] == 0x11 and pec(frame) == r[-1]
+        print(f"  ARP 0x61 Get UDID: {r[1:17].hex()} address 0x{r[17] >> 1:02X} "
+              f"PEC {'ok' if ok else 'BAD'}")
+        found.append(("arp", r[17] >> 1))
+    except p.I3cError as e:
+        print(f"  ARP 0x61 Get UDID: {e.status_code.name} (no ARP-capable device)")
+    return found
+
+
+def cmd_handoff(args):
+    dev = p.Device.open(serial=args.serial, model=p.DeviceModel.SUPERNOVA)
+    i3c = dev.i3c()
+    try:
+        i3c.set_voltage(voltage_mv=args.voltage_mv)
+        i3c.bring_up(
+            push_pull_rate=p.I3cPushPullRate.PUSH_PULL_1_MHZ_DC_40,
+            open_drain_rate=p.I3cOpenDrainRate.OPEN_DRAIN_100_KHZ,
+            i2c_open_drain_rate=p.I2cOpenDrainRate.STANDARD_MODE,
+        )
+        print(f"{dev.info.fw_version}  I3C port {args.voltage_mv} mV (SMBus voltage)")
+
+        def disec():
+            try:
+                i3c.ccc.disec_broadcast(p.I3cEvent.HJ)
+                return True
+            except p.I3cError as e:
+                if e.status_code.name != "FW_I3C_NACK_ADDRESS":
+                    raise
+                return False
+
+        acked = disec()
+        print(f"1. DISEC(DISHJ) to 7Eh: {'ACK, an I3C Basic device is present' if acked else 'NACK, SMBus only'}")
+        state = i3c.enable_i2c_clock_stretching(args.khz * 1000)   # CCCs are refused from here on
+        print(f"2. SMBus discovery, stretching on, SCL {state.frequency_hz} Hz")
+        found = smbus_discovery(i3c, args.address)
+        i3c.disable_i2c_clock_stretching()
+        if not acked:
+            print("   SMBus mode stays. To reset the interface, hold SCL low for T2wrst or pulse SMRST#.")
+            return 0 if found else 1
+        if found and not args.no_smbus_only:
+            print("3. An SMBus-only device answered: the flow resets the SMBus interface")
+            print("   (SCL low for T2wrst, or SMRST#) and stays in SMBus mode. Pass --no-smbus-only")
+            print("   if the devices found are the I3C Basic device itself.")
+            return 0
+        print(f"3. DISEC(DISHJ) to 7Eh again: {'ACK' if disec() else 'NACK'}")
+        if not args.yes:
+            input("4. Switch SMBus pull-ups off and I3C Basic pull-ups on, then press Enter ")
+        time.sleep(args.t_smb2i3c_ms / 1000)
+        i3c.set_voltage(voltage_mv=args.i3c_voltage_mv)
+        joined = []
+        sub = dev.subscribe(p.I3cHotJoinNotification, joined.append)
+        try:
+            i3c.ccc.enec_broadcast(p.I3cEvent.HJ)
+            print(f"5. ENEC(ENHJ) to 7Eh at {args.i3c_voltage_mv} mV: ACK")
+        except p.I3cError as e:
+            print(f"5. ENEC(ENHJ) to 7Eh at {args.i3c_voltage_mv} mV: {e.status_code.name}")
+        deadline = time.monotonic() + args.hj_timeout_s
+        while not joined and time.monotonic() < deadline:
+            time.sleep(0.05)
+        sub.unsubscribe()
+        for n in joined:
+            print(f"6. Hot-Join: PID {bytes(n.pid).hex()} BCR 0x{n.bcr:02X} DCR 0x{n.dcr:02X} "
+                  f"dynamic address 0x{n.dynamic_address:02X}")
+        if not joined:
+            print(f"6. No Hot-Join in {args.hj_timeout_s} s: continue detection, or reset and "
+                  "return to SMBus mode")
+        return 0 if joined else 1
+    finally:
+        dev.close()
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--version", action="version", version=f"%(prog)s {TOOL_VERSION}")
     ap.add_argument("--serial", help="Supernova serial number, if more than one is connected")
     ap.add_argument("--voltage-mv", type=int, default=3300,
                     help="I3C port voltage; 1200-3300 selects the HV connector (default 3300)")
-    ap.add_argument("--khz", type=int, default=100, help="SCL rate, 10-400 kHz (default 100)")
+    ap.add_argument("--khz", type=int, default=100, help="SCL rate, 10-1000 kHz; the adapter tops out near 750 kHz (default 100)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     r = sub.add_parser("read", help="read bytes, optionally after a register byte")
@@ -145,6 +253,18 @@ def main(argv=None):
     s.add_argument("--count", type=int, default=100, help="reads per stretch duration")
     s.add_argument("--length", type=int, default=16, help="bytes per read")
     s.set_defaults(func=cmd_sweep)
+
+    h = sub.add_parser("handoff", help="SMBus to I3C Basic detection flow (PCI-SIG ECN, Chapter 12)")
+    h.add_argument("--address", type=number, nargs="+", default=[0x2A],
+                   help="static SMBus addresses to probe (default 0x2A)")
+    h.add_argument("--i3c-voltage-mv", type=int, default=1800, help="I3C Basic voltage (default 1800)")
+    h.add_argument("--t-smb2i3c-ms", type=float, default=0.0,
+                   help="wait after the last 7Eh before I3C signalling (Tsmb2i3c, from the ECN)")
+    h.add_argument("--hj-timeout-s", type=float, default=1.0, help="how long to wait for a Hot-Join")
+    h.add_argument("--no-smbus-only", action="store_true",
+                   help="treat devices found in step 2 as the I3C Basic device, not SMBus-only parts")
+    h.add_argument("--yes", action="store_true", help="do not stop for the pull-up switch")
+    h.set_defaults(func=cmd_handoff)
 
     args = ap.parse_args(argv)
     try:
