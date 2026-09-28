@@ -17,8 +17,9 @@ transfer and turns it off again.
 "Chapter 12. Architectural Out-of-Band Management" as far as the adapter can:
 DISEC(DISHJ) to 7Eh, SMBus discovery (static addresses and ARP Get UDID with
 PEC), then, for a device that answered 7Eh, ENEC(ENHJ) and the Hot-Join.
-Switching the pull-ups and resetting the SMBus interface (SCL low for T2wrst,
-or SMRST#) are hardware steps the script asks you to do.
+`--t2wrst-us` resets the SMBus interface by holding SCL low (firmware 4.6.0),
+and `--sda-pull-up` sets the adapter's SDA pull-up for the SMBus phase. SCL has
+no pull-up on the adapter, so the external SCL pull-up is still switched by hand.
 
 `read` and `write` work with any target. `sweep` needs the reference target
 supplied with AN0014 (stretch_target_pic18q20.c): it tells the target how long
@@ -34,7 +35,7 @@ import time
 
 import pycosmicsdk as p
 
-TOOL_VERSION = "1.1"
+TOOL_VERSION = "1.2"
 
 ARP_ADDRESS = 0x61      # SMBus Device Default Address
 ARP_GET_UDID = 0x03     # general Get UDID: count 0x11, 16 UDID bytes, address, PEC
@@ -166,6 +167,16 @@ def smbus_discovery(i3c, addresses):
     return found
 
 
+def smbus_reset(i3c, t2wrst_us):
+    """Reset the SMBus interface: SCL low for T2wrst. Returns False when not asked for."""
+    if not t2wrst_us:
+        print("   To reset the SMBus interface, pass --t2wrst-us (SCL low for T2wrst) or pulse SMRST#.")
+        return False
+    held = i3c.hold_scl_low(t2wrst_us)
+    print(f"   SMBus reset: SCL held low {held} us (asked {t2wrst_us} us)")
+    return True
+
+
 def cmd_handoff(args):
     dev = p.Device.open(serial=args.serial, model=p.DeviceModel.SUPERNOVA)
     i3c = dev.i3c()
@@ -187,6 +198,8 @@ def cmd_handoff(args):
                     raise
                 return False
 
+        if args.sda_pull_up:
+            i3c.set_sda_pull_up(p.I3cSdaPullUp[args.sda_pull_up])
         acked = disec()
         print(f"1. DISEC(DISHJ) to 7Eh: {'ACK, an I3C Basic device is present' if acked else 'NACK, SMBus only'}")
         state = i3c.enable_i2c_clock_stretching(args.khz * 1000)   # CCCs are refused from here on
@@ -194,16 +207,18 @@ def cmd_handoff(args):
         found = smbus_discovery(i3c, args.address)
         i3c.disable_i2c_clock_stretching()
         if not acked:
-            print("   SMBus mode stays. To reset the interface, hold SCL low for T2wrst or pulse SMRST#.")
+            print("   SMBus mode stays.")
+            smbus_reset(i3c, args.t2wrst_us)
             return 0 if found else 1
         if found and not args.no_smbus_only:
-            print("3. An SMBus-only device answered: the flow resets the SMBus interface")
-            print("   (SCL low for T2wrst, or SMRST#) and stays in SMBus mode. Pass --no-smbus-only")
-            print("   if the devices found are the I3C Basic device itself.")
+            print("3. An SMBus-only device answered: reset the SMBus interface and stay in SMBus mode.")
+            print("   Pass --no-smbus-only if the devices found are the I3C Basic device itself.")
+            smbus_reset(i3c, args.t2wrst_us)
             return 0
         print(f"3. DISEC(DISHJ) to 7Eh again: {'ACK' if disec() else 'NACK'}")
         if not args.yes:
-            input("4. Switch SMBus pull-ups off and I3C Basic pull-ups on, then press Enter ")
+            input("4. Switch the external SMBus pull-up on SCL off, then press Enter "
+                  "(the adapter's SDA pull-up follows the I3C engine) ")
         time.sleep(args.t_smb2i3c_ms / 1000)
         i3c.set_voltage(voltage_mv=args.i3c_voltage_mv)
         joined = []
@@ -264,6 +279,10 @@ def main(argv=None):
     h.add_argument("--no-smbus-only", action="store_true",
                    help="treat devices found in step 2 as the I3C Basic device, not SMBus-only parts")
     h.add_argument("--yes", action="store_true", help="do not stop for the pull-up switch")
+    h.add_argument("--t2wrst-us", type=int, default=0,
+                   help="SMBus reset: hold SCL low this long where the flow resets the interface")
+    h.add_argument("--sda-pull-up", choices=["AUTO", "OFF", "ON"],
+                   help="adapter SDA pull-up during the SMBus phase (default: leave as is)")
     h.set_defaults(func=cmd_handoff)
 
     args = ap.parse_args(argv)
