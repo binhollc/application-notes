@@ -28,7 +28,7 @@ Every note is published in three places:
 | [AN0011](AN0011-cmis-firmware-update-time/) | Measuring CMIS firmware update time with the Binho Supernova | 0.4 | [PDF](AN0011-cmis-firmware-update-time/AN0011.pdf) · draft, not on the CDN |
 | [AN0012](AN0012-pulsar-canfd-over-slcan/) | Interfacing CAN-FD devices with the Binho Pulsar | 0.1 | [PDF](AN0012-pulsar-canfd-over-slcan/AN0012.pdf) · draft, not on the CDN |
 | [AN0013](AN0013-replaying-i2c-captures/) | Replaying a captured I2C bus onto real hardware with the Binho Pulsar | 0.1 | [PDF](AN0013-replaying-i2c-captures/AN0013.pdf) · draft, not on the CDN |
-| [AN0014](AN0014-smbus-clock-stretching-on-the-i3c-port/) | Single-port I2C/SMBus/I3C operation for NVMe-MI on Binho Supernova | 0.1 | draft, not on the CDN |
+| [AN0014](AN0014-smbus-clock-stretching-on-the-i3c-port/) | Single-port I2C/SMBus/I3C operation for NVMe-MI on Binho Supernova | 0.2 | draft, not on the CDN |
 | [AN0015](AN0015-setting-the-i2c-scl-duty-cycle/) | Setting the I2C SCL duty cycle and an exact bus frequency with the Binho Supernova and Pulsar | 0.1 | draft, not on the CDN |
 
 A note at revision 0.x is a draft: it is under internal review and is not published. A
