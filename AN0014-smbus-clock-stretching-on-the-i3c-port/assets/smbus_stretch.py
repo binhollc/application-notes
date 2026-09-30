@@ -67,9 +67,14 @@ def pec(data):
 assert pec(b"123456789") == 0xF4   # CRC-8/SMBUS check value
 
 
+def open_one(serial, model):
+    """Open by serial when given, else the first adapter of that model (the SDK takes one or the other)."""
+    return p.Device.open(serial=serial) if serial else p.Device.open(model=model)
+
+
 def open_port(args):
     """Open the Supernova, power the I3C port and bring the bus up."""
-    dev = p.Device.open(serial=args.serial, model=p.DeviceModel.SUPERNOVA)
+    dev = open_one(args.serial, p.DeviceModel.SUPERNOVA)
     i3c = dev.i3c()
     i3c.set_voltage(voltage_mv=args.voltage_mv)
     # The rates apply to I3C traffic; the stretching mode sets its own SCL rate.
@@ -169,7 +174,7 @@ def smbus_discovery(i3c, addresses):
 
 def set_pulsar_pull_up(serial, pull_up):
     """Reference bench only: the SMBus pull-ups come from a Binho Pulsar's I2C port."""
-    pul = p.Device.open(serial=None if serial == "any" else serial, model=p.DeviceModel.PULSAR)
+    pul = open_one(None if serial == "any" else serial, p.DeviceModel.PULSAR)
     try:
         i2c = pul.i2c()
         i2c.set_voltage(voltage_mv=3300)
@@ -198,7 +203,7 @@ def cmd_handoff(args):
         print(text, flush=True)
         time.sleep(args.step_delay_s)   # spaces the steps apart on a logic analyzer
 
-    dev = p.Device.open(serial=args.serial, model=p.DeviceModel.SUPERNOVA)
+    dev = open_one(args.serial, p.DeviceModel.SUPERNOVA)
     i3c = dev.i3c()
     try:
         i3c.set_voltage(voltage_mv=args.voltage_mv)
