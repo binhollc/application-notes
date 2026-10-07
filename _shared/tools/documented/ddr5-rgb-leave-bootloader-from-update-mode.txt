@@ -1,0 +1,2 @@
+before: PID 0x0B00 protocol 1
+after:  PID 0x0B01 protocol 4
