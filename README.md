@@ -28,7 +28,7 @@ Every note is published in three places:
 | [AN0011](AN0011-cmis-firmware-update-time/) | Measuring CMIS firmware update time with the Binho Supernova | 0.4 | [PDF](AN0011-cmis-firmware-update-time/AN0011.pdf) · draft, not on the CDN |
 | [AN0012](AN0012-pulsar-canfd-over-slcan/) | Interfacing CAN-FD devices with the Binho Pulsar | 0.1 | [PDF](AN0012-pulsar-canfd-over-slcan/AN0012.pdf) · draft, not on the CDN |
 | [AN0013](AN0013-replaying-i2c-captures/) | Replaying a captured I2C bus onto real hardware with the Binho Pulsar | 0.1 | [PDF](AN0013-replaying-i2c-captures/AN0013.pdf) · draft, not on the CDN |
-| [AN0016](AN0016-ddr5-spd-hub-and-rgb/) | Reading a DDR5 SPD hub and driving Corsair RGB over the DIMM sideband with the Binho Supernova | 0.1 | draft, not on the CDN; no PDF yet |
+| [AN0016](AN0016-ddr5-spd-hub-and-rgb/) | Reading a DDR5 SPD hub and driving Corsair RGB over the DIMM sideband with the Binho Supernova | 0.1 | [PDF](AN0016-ddr5-spd-hub-and-rgb/AN0016.pdf) · draft, not on the CDN |
 
 A note at revision 0.x is a draft: it is under internal review and is not published. A
 draft may carry a PDF in its folder so it can be read on paper, but that PDF is not the
