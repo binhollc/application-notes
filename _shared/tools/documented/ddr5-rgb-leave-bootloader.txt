@@ -1,0 +1,2 @@
+before: PID 0x0B01 protocol 4
+not in firmware-update mode; nothing written
