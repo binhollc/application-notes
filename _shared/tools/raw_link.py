@@ -1,4 +1,4 @@
-"""raw_link.py — raw HID command channel plus the vendor bulk IN endpoint, no SDK.
+"""raw_link.py: raw HID command channel plus the vendor bulk IN endpoint, no SDK.
 
 Used for commands no released SDK knows yet (I3C_CONTROLLER_CAPTURE_LINES). Wire format, from
 usb_transfer_protocol.h and commands_definitions.h:
@@ -32,7 +32,8 @@ class RawLink:
         paths = [d["path"] for d in hid.enumerate(VID, SUPERNOVA_PID)
                  if d["serial_number"] == serial and d["interface_number"] == 0]
         if not paths:
-            raise RuntimeError(f"no HID interface for {serial}")
+            found = sorted({d["serial_number"] for d in hid.enumerate(VID, SUPERNOVA_PID)})
+            raise RuntimeError(f"no Supernova with serial {serial}; connected: {found or 'none'}")
         self.h = hid.device()
         self.h.open_path(paths[0])
         self.usb = usb.core.find(idVendor=VID, idProduct=SUPERNOVA_PID,

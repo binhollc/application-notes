@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""view_vd55g1.py — live view of the VD55G1 (Gilisymo LS-CAM-I3C) through the Supernova.
+"""view_vd55g1.py: live view of the VD55G1 (Gilisymo LS-CAM-I3C) through the Supernova.
 
 Boots the sensor once, then loops: capture the next frame (I3C_CONTROLLER_CAPTURE_LINES; its
 START_STREAMING write is ACKed while already streaming) and show it. The sensor's frame length
@@ -52,7 +52,7 @@ def main():
     status.pack()
     rec = None
     if args.record:
-        # ponytail: fixed 10 fps tag; the sensor runs at ~9.8 with --frame-length 300
+        # The file is tagged 10 fps; the sensor runs at ~9.8 with --frame-length 300.
         rec = subprocess.Popen(["ffmpeg", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "gray",
                                 "-s", f"{w * args.scale}x{h * args.scale}", "-r", "10", "-i", "-",
                                 "-pix_fmt", "yuv420p", args.record], stdin=subprocess.PIPE)

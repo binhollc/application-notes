@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""capture_vd55g1.py — I3C_CONTROLLER_CAPTURE_LINES against an STMicro VD55G1 (Gilisymo LS-CAM-I3C).
+"""capture_vd55g1.py: I3C_CONTROLLER_CAPTURE_LINES against an STMicro VD55G1 (Gilisymo LS-CAM-I3C).
 
 The sensor reads out over I3C one line at a time and drops a line it is not read within ~340 us,
 so the reads have to happen on the adapter. This script boots the sensor with pycosmicsdk, closes
@@ -7,7 +7,7 @@ the SDK (the I3C and GPIO configuration survive in fw), then sends the capture c
 and collects the frame(s) from vendor bulk IN. One run = power-up + boot + one capture command, so
 `--runs N` gives a pass ratio.
 
-Wiring (Supernova rev C): LS-CAM-I3C on the I3C HV port at 3300 mV, VIN from the HV rail, NRST on
+Wiring (Supernova rev C): LS-CAM-I3C on the I3C HV port at 3300 mV, VIN 3.3 V, NRST on
 GPIO PIN_1, sensor GPIO0 (line ready) on GPIO PIN_3, GPIO1 on PIN_5. Boots with GPIO0 wired (8/8);
 a logic-analyzer probe on GPIO0 does block the boot. Loose jumpers drop the sensor (address NACK).
 
@@ -145,8 +145,8 @@ class Cam:
         self.wr(0x0502, exposure & 0xFF, exposure >> 8)
 
     def readout_rate(self, rate="PUSH_PULL_10_MHZ_DC_40"):
-        # Line reads must fit the ~340 us line period: 10 MHz, as ST's 9.5. Only after boot -- right
-        # after NRST the sensor NACKs at 10 MHz -- and 12.5 MHz NACKed 20/20 on the jumper wiring.
+        # Line reads must fit the ~340 us line period: 10 MHz, as ST's 9.5. Only after boot: right
+        # after NRST the sensor NACKs at 10 MHz.
         self.i3c.configure(push_pull_rate=getattr(S.I3cPushPullRate, rate),
                            open_drain_rate=S.I3cOpenDrainRate.OPEN_DRAIN_1_MHZ,
                            i2c_open_drain_rate=S.I2cOpenDrainRate.FAST_MODE)
@@ -224,7 +224,8 @@ def capture_once(args, da, run):
 
 
 def one_run(args, patches, run):
-    return capture_once(args, boot_sensor(args, patches), run)
+    da = boot_sensor(args, patches)
+    return trace_once(args, da) if args.trigger == "trace" else capture_once(args, da, run)
 
 
 def main():
@@ -242,7 +243,7 @@ def main():
     ap.add_argument("--run", type=int, default=0, help="run number for --phase capture output names")
     ap.add_argument("--da", type=lambda v: int(v, 0), default=0x08, help="sensor address for --phase capture")
     ap.add_argument("--line-ready-gpio", type=int, choices=range(4), default=0,
-                    help="sensor GPIO that carries line ready (GPIO0 is a boot strap: wired, it blocks boot)")
+                    help="sensor GPIO that carries line ready")
     ap.add_argument("--readout-ctrl", type=lambda v: int(v, 0), default=0x03, help="I3C_FRAME_READOUT_CTRL (0x0324)")
     ap.add_argument("--readout-rate", default="PUSH_PULL_10_MHZ_DC_40", help="I3cPushPullRate name for line reads")
     ap.add_argument("--lines", type=int, default=0, help="capture this many lines instead of height x frames")
@@ -254,7 +255,7 @@ def main():
     ap.add_argument("--exposure", type=int, default=500, help="exposure lines, <= frame length 700 (manual mode)")
     ap.add_argument("--frame-length", type=int, default=700, help="sensor frame length in lines")
     ap.add_argument("--line-period-ns", type=int, default=340500,
-                    help="--trigger gpio-timed: line N is read at line 0's edge + N x this (clean 5/5 from 337.7 to 345 us at 300 us delay)")
+                    help="--trigger gpio-timed: line N is read at line 0's edge + N x this (clean 5/5 from 339.0 to 347.0 us at 300 us delay)")
     ap.add_argument("--trace-ms", type=int, default=300, help="--trigger trace: how long to log PIN_3")
     args = ap.parse_args()
     if not 0 <= args.post_delay_us <= 1000:
@@ -270,7 +271,7 @@ def main():
         once = trace_once(args, args.da) if args.trigger == "trace" else capture_once(args, args.da, args.run)
         return 0 if once else 1
     passed = sum(one_run(args, patches, r) for r in range(args.runs))
-    print(f"{passed}/{args.runs} runs captured every line")
+    print(f"{passed}/{args.runs} runs passed")
     return 0 if passed == args.runs else 1
 
 
