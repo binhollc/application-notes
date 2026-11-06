@@ -1,0 +1,3 @@
+MR0-1 5118  (SPD5118 reads 5118)
+MR2 revision 0x14  MR18 0x00  (bit 5 = I3C mode)
+MR49-50 CC 01 = 28.75 C

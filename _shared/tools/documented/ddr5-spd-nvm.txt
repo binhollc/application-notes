@@ -1,0 +1,5 @@
+MR0-1 5118  (SPD5118 reads 5118)
+MR2 revision 0x14  MR18 0x00  (bit 5 = I3C mode)
+MR49-50 CC 01 = 28.75 C
+NVM: 1024 bytes to my_module_spd.bin, MR11 restored to 0x00
+SPD byte 2 0x12 (0x12 = DDR5), byte 3 0x02, CRC 0-509 calc 0x45BF stored 0x45BF OK

@@ -1,0 +1,105 @@
+VERSION ""
+
+
+NS_ : 
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_TYPE_REF_
+	VAL_TABLE_
+	SIG_GROUP_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_EV_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_: 
+
+
+BO_ 256 Heartbeat: 8 Node
+ SG_ EchoCount : 48|16@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ RxCount : 32|16@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ Seq : 0|32@1+ (1,0) [0|0] "" Vector__XXX
+
+BO_ 272 Environment: 8 Node
+ SG_ EnvSeq : 56|8@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ Flags : 48|8@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ Pressure : 32|16@1+ (0.1,0) [0|0] "hPa" Vector__XXX
+ SG_ Humidity : 16|16@1+ (0.1,0) [0|0] "%" Vector__XXX
+ SG_ Temperature : 0|16@1- (0.1,0) [0|0] "degC" Vector__XXX
+
+BO_ 512 FdRamp: 64 Node
+ SG_ FirstByte : 0|8@1+ (1,0) [0|0] "" Vector__XXX
+
+BO_ 528 Telemetry: 48 Node
+ SG_ Sample15 : 336|16@1- (1,0) [0|0] "" Vector__XXX
+ SG_ Sample14 : 320|16@1- (1,0) [0|0] "" Vector__XXX
+ SG_ Sample13 : 304|16@1- (1,0) [0|0] "" Vector__XXX
+ SG_ Sample12 : 288|16@1- (1,0) [0|0] "" Vector__XXX
+ SG_ Sample11 : 272|16@1- (1,0) [0|0] "" Vector__XXX
+ SG_ Sample10 : 256|16@1- (1,0) [0|0] "" Vector__XXX
+ SG_ Sample09 : 240|16@1- (1,0) [0|0] "" Vector__XXX
+ SG_ Sample08 : 224|16@1- (1,0) [0|0] "" Vector__XXX
+ SG_ Sample07 : 208|16@1- (1,0) [0|0] "" Vector__XXX
+ SG_ Sample06 : 192|16@1- (1,0) [0|0] "" Vector__XXX
+ SG_ Sample05 : 176|16@1- (1,0) [0|0] "" Vector__XXX
+ SG_ Sample04 : 160|16@1- (1,0) [0|0] "" Vector__XXX
+ SG_ Sample03 : 144|16@1- (1,0) [0|0] "" Vector__XXX
+ SG_ Sample02 : 128|16@1- (1,0) [0|0] "" Vector__XXX
+ SG_ Sample01 : 112|16@1- (1,0) [0|0] "" Vector__XXX
+ SG_ Sample00 : 96|16@1- (1,0) [0|0] "" Vector__XXX
+ SG_ Reserved : 80|16@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ SampleCount : 64|16@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ UptimeMs : 32|32@1+ (1,0) [0|0] "ms" Vector__XXX
+ SG_ TraceSeq : 0|32@1+ (1,0) [0|0] "" Vector__XXX
+
+BO_ 801 EchoResponse: 8 Node
+ SG_ Byte0 : 0|8@1+ (1,0) [0|0] "" Vector__XXX
+
+BO_ 1536 CommandRequest: 8 Host
+ SG_ Arg : 8|16@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ Command : 0|8@1+ (1,0) [0|0] "" Vector__XXX
+
+BO_ 1537 CommandResponse: 8 Node
+ SG_ Payload1 : 16|8@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ Payload0 : 8|8@1+ (1,0) [0|0] "" Vector__XXX
+ SG_ Command : 0|8@1+ (1,0) [0|0] "" Vector__XXX
+
+
+
+
+CM_ BO_ 256 "Liveness and counters. Classic CAN so any tool can read it.";
+CM_ BO_ 272 "Simulated sensor values. Classic CAN, 100 ms by default; the rate is changed with SET_RATE on 0x600.";
+CM_ BO_ 512 "Diagnostic byte ramp. Its only job is to be a 64-byte FD frame, which a classic-only host cannot receive at all.";
+CM_ BO_ 528 "A 16-sample trace in one frame. The same trace over classic CAN is six frames plus a reassembly scheme.";
+CM_ BO_ 801 "Echo of a 0x123 request. Length and frame type follow the request, so the DBC can only describe the first bytes.";
+CM_ BO_ 1536 "1 = INFO, 2 = COUNTERS, 3 = SET_RATE with Arg in ms.";
+CM_ BO_ 1537 "First byte echoes the command, so a reply matches its request without a transaction id.";
+
+
+
+VAL_ 1537 Command 1 "INFO" 2 "COUNTERS" 3 "SET_RATE" 255 "ERROR" ;
+BA_DEF_ BO_  "VFrameFormat" ENUM  "StandardCAN","ExtendedCAN","reserved","J1939PG","StandardCAN_FD","ExtendedCAN_FD";
+BA_DEF_DEF_  "VFrameFormat" "StandardCAN";
+BA_ "VFrameFormat" BO_ 512 4;
+BA_ "VFrameFormat" BO_ 528 4;

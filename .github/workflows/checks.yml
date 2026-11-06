@@ -1,0 +1,79 @@
+# The two checks in this repository, run so that they gate rather than sit
+# there. Both existed as scripts before this workflow did, and the failures
+# they describe had already happened and gone unnoticed for a week, which is
+# what a check nobody runs buys you.
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # The CDN can go stale without anything being pushed here, so this one also
+  # needs to run on a clock. 07:00 UTC daily.
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  house-rules:
+    name: house rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: check_house_rules.py
+        run: python check_house_rules.py
+
+  published-revs:
+    name: published revisions
+    # Reads cdn.binho.io, so unlike the house rules this needs the network and
+    # says nothing useful without it.
+    #
+    # This runs on pull requests as well as on a schedule, which is correct for
+    # the documented pipeline in binho-newsletters/docs/APPNOTES.md: publishing
+    # to the CDN is step 7 and pushing the note folder is step 8, so by the time
+    # a note reaches a pull request it should already be published. A note whose
+    # rev is bumped in a pull request and not yet published is exactly the state
+    # that left AN0002 through AN0005 a revision behind, so failing here is the
+    # point. If the team ever moves to reviewing before publishing, drop the
+    # pull_request trigger from this job rather than making it non-blocking.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: check_published_revs.py
+        run: python check_published_revs.py
+
+  line-endings:
+    name: line endings
+    # .gitattributes pins eol=lf, but that only governs what git writes. A file
+    # committed with CRLF before those rules existed, or added by a tool that
+    # wrote bytes directly, still gets through. This asks git what it thinks is
+    # in the index, which is the thing that actually ships.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: no CRLF in the index, except where .gitattributes allows it
+        run: |
+          # attr/-text is the deliberate exemption: the PDFs, archives, vendor
+          # firmware images and the generated DBC, which is a CRLF format and
+          # must ship exactly as its generator writes it. Anything else stored
+          # as CRLF, or with the two mixed, is a mistake.
+          bad=$(git ls-files --eol | grep -E '^i/(crlf|mixed)' \
+                | grep -v 'attr/-text' || true)
+          if [ -n "$bad" ]; then
+            echo "these are stored with CRLF in the index:"
+            echo "$bad"
+            echo
+            echo "the repository stores LF; see .gitattributes"
+            exit 1
+          fi
+          echo "every text file is stored as LF"

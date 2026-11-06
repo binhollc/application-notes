@@ -1,0 +1,41 @@
+# mask-fingerprint: b918a1960c13
+bmi323  (Bosch Sensortec, 6-axis IMU)
+  dynamic address <addr>
+
+  PID 07 70 10 43 00 00
+    MIPI member id (47:33)       0x03B8
+    id type selector (32)        0
+    device id (31:16)            0x1043
+    instance id (15:12)          0b0000
+    reserved (11:0)              0x000
+
+  BCR 0x06
+    device role                      I3C target
+    advanced capabilities (bit 5)    no, so SDR only
+    virtual target support           no
+    offline capable                  yes
+    IBI mandatory payload            yes
+    IBI capable                      yes
+    max data speed limit             no limit
+
+  DCR 0xEF
+
+  CHIP_ID register 0x00 reads 0x1143, raw <bytes>
+    chip id field 0x43, expected 0x43: match
+    compared under mask 0x00FF, because the register carries other fields
+
+  register access: 2-byte data, 2 dummy byte(s) before a read payload
+  observable: tilt the board and the accelerometer axes change sign; at rest the magnitude is about 1 g
+
+  registers
+    <reg-addr> CHIP_ID          <reg-value>
+    <reg-addr> ERR_REG          <reg-value>
+    <reg-addr> STATUS           <reg-value>
+    <reg-addr> ACC_DATA_X       <reg-value>
+    <reg-addr> ACC_DATA_Y       <reg-value>
+    <reg-addr> ACC_DATA_Z       <reg-value>
+    <reg-addr> TEMP_DATA        <reg-value>
+    <reg-addr> INT_STATUS_IBI   <reg-value>
+    <reg-addr> ACC_CONF         <reg-value>
+    <reg-addr> GYR_CONF         <reg-value>
+    <reg-addr> INT_MAP2         <reg-value>

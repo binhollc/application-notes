@@ -1,0 +1,9 @@
+# mask-fingerprint: b918a1960c13
+bmp585 at <addr>: interrupt routed to the I3C IBI, pulsed
+  the target declared a 50 byte interrupt payload and was asked for 0, which is what the adapter takes
+  IBI from <addr>  MDB 01  data ready=True, FIFO full=False, FIFO threshold=False, pressure out of range=False
+  IBI from <addr>  MDB 01  data ready=True, FIFO full=False, FIFO threshold=False, pressure out of range=False
+
+  <n> interrupts in <seconds> = <rate>
+  configured output data rate 10 Hz (<error>)
+  the rate is comparable with the configured rate; individual arrival times are not, because USB coalesces them

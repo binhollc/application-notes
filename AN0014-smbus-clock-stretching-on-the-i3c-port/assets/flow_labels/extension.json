@@ -1,0 +1,13 @@
+{
+  "version": "0.1.0",
+  "apiVersion": "1.0.0",
+  "author": "Binho",
+  "name": "SMBus to I3C Basic flow",
+  "description": "Labels the steps of the PCI-SIG out-of-band detection flow on top of the I2C analyzer (AN0014).",
+  "extensions": {
+    "SMBus to I3C Basic flow": {
+      "type": "HighLevelAnalyzer",
+      "entryPoint": "FlowLabels.FlowLabels"
+    }
+  }
+}

@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" font-family="Helvetica, Arial, sans-serif" font-size="12">
+  <rect width="760" height="300" fill="#ffffff"/>
+  <!-- labels -->
+  <text x="10" y="58" font-weight="bold">GPIO0</text>
+  <text x="10" y="72" fill="#555">line ready</text>
+  <text x="10" y="128" font-weight="bold">Sensor</text>
+  <text x="10" y="142" fill="#555">line written</text>
+  <text x="10" y="198" font-weight="bold">I3C</text>
+  <text x="10" y="212" fill="#555">line read</text>
+  <!-- GPIO0: low, rises at t0, stays high -->
+  <polyline points="110,75 160,75 160,45 740,45" fill="none" stroke="#000" stroke-width="2"/>
+  <text x="152" y="92" text-anchor="middle">t0</text>
+  <!-- sensor line slots -->
+  <g fill="#e8eef7" stroke="#4a6fa5">
+    <rect x="160" y="115" width="110" height="28"/>
+    <rect x="270" y="115" width="110" height="28"/>
+    <rect x="380" y="115" width="110" height="28"/>
+    <rect x="600" y="115" width="110" height="28"/>
+  </g>
+  <g text-anchor="middle">
+    <text x="215" y="133">line 0</text>
+    <text x="325" y="133">line 1</text>
+    <text x="435" y="133">line 2</text>
+    <text x="545" y="133">...</text>
+    <text x="655" y="133">line 119</text>
+  </g>
+  <!-- reads: each starts at t0 + N x period + delay -->
+  <g fill="#f3e3c3" stroke="#a5742a">
+    <rect x="257" y="185" width="85" height="28"/>
+    <rect x="367" y="185" width="85" height="28"/>
+    <rect x="477" y="185" width="85" height="28"/>
+    <rect x="697" y="185" width="50" height="28"/>
+  </g>
+  <g text-anchor="middle">
+    <text x="299" y="203">read 0</text>
+    <text x="409" y="203">read 1</text>
+    <text x="519" y="203">read 2</text>
+    <text x="722" y="203">119</text>
+  </g>
+  <!-- delay marker -->
+  <line x1="160" y1="230" x2="257" y2="230" stroke="#000" marker-end="url(#a)" marker-start="url(#a)"/>
+  <text x="208" y="246" text-anchor="middle">readDelayUs (300 us)</text>
+  <!-- period marker -->
+  <line x1="257" y1="262" x2="367" y2="262" stroke="#000" marker-end="url(#a)" marker-start="url(#a)"/>
+  <text x="312" y="278" text-anchor="middle">linePeriodNs (340.5 us)</text>
+  <line x1="160" y1="45" x2="160" y2="235" stroke="#999" stroke-dasharray="3,3"/>
+  <line x1="257" y1="185" x2="257" y2="267" stroke="#999" stroke-dasharray="3,3"/>
+  <line x1="367" y1="185" x2="367" y2="267" stroke="#999" stroke-dasharray="3,3"/>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000"/>
+    </marker>
+  </defs>
+  <text x="380" y="20" text-anchor="middle" font-weight="bold">One frame: one GPIO0 edge, 120 reads paced by the adapter's timer</text>
+</svg>
